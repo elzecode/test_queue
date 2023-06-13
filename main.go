@@ -10,6 +10,7 @@ import (
 )
 
 var queues map[string][]string
+var waiting []chan bool // пул каналов на ожидании сообщений
 
 func main() {
 	if len(os.Args) < 2 {
@@ -37,14 +38,29 @@ func handle(w http.ResponseWriter, r *http.Request) {
 		msg, err := getMsg(queue)
 		if err != nil {
 			if timeout > 0 {
-				for range time.Tick(time.Second) {
-					if msg, err = getMsg(queue); err == nil {
+				// создаем канал на ожидание добавляем в пул
+				wait := make(chan bool)
+				waiting = append(waiting, wait)
+				go func() {
+					for range time.Tick(time.Second) {
+						select {
+						case _, ok := <-wait: // если канал закрыт выходим
+							if !ok {
+								break
+							}
+						default:
+							if timeout--; timeout == 0 { // если таймаут исчерпан выходим
+								break
+							}
+						}
+					}
+				}()
+				if <-wait { // если в канал пришла истина идем за новым сообщением
+					if msg, err := getMsg(queue); err == nil {
 						w.Write([]byte(msg))
-						return
 					}
-					if timeout--; timeout == 0 {
-						break
-					}
+					close(wait)
+					return
 				}
 			}
 			w.WriteHeader(http.StatusNotFound)
@@ -65,4 +81,8 @@ func getMsg(queue string) (string, error) {
 
 func putMsg(queue, msg string) {
 	queues[queue] = append(queues[queue], msg)
+	if len(waiting) > 0 { // если в очереди есть ожидающие, уведомляем о новом сообщении
+		waiting[0] <- true
+		waiting = waiting[1:]
+	}
 }
